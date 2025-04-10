@@ -1,6 +1,6 @@
 import { LeanFileProgressProcessingInfo, ServerStoppedReason } from '@leanprover/infoview-api'
 import path from 'path'
-import { Disposable, EventEmitter, OutputChannel, commands, workspace } from 'vscode'
+import { Disposable, EventEmitter, OutputChannel, commands, workspace, window } from 'vscode'
 import { SetupDiagnostics, checkAll } from '../diagnostics/setupDiagnostics'
 import { PreconditionCheckResult, SetupNotificationOptions } from '../diagnostics/setupNotifs'
 import { LeanClient } from '../leanclient'
@@ -299,11 +299,60 @@ export class LeanClientProvider implements Disposable {
             this.diagnosticsChangedEmitter.fire(p)
         })
 
-        // Fired before starting the client because the InfoView uses this to register
-        // events on `client` that fire during `start`.
-        this.clientAddedEmitter.fire(client)
+        try {
+            // Fired before starting the client because the InfoView uses this to register
+            // events on `client` that fire during `start`.
+            this.clientAddedEmitter.fire(client)
 
-        await client.start()
+            logger.log(`[ClientProvider] Starting LeanClient for folder: ${key}`)
+            await client.start() // This now calls startClient internally
+
+            // Check if client actually started successfully
+            if (!client.isRunning()) {
+                 logger.error(`[ClientProvider] Client for ${key} failed to reach running state after start() call.`)
+                 // The serverFailed handler should have cleaned up, but double-check
+                 if (this.clients.has(key)) {
+                    this.clients.delete(key);
+                    client.dispose();
+                 }
+                 if (this.activeClient === client) this.activeClient = undefined;
+                 this.pending.delete(key);
+                 return [false, undefined];
+            }
+
+            logger.log(`[ClientProvider] LeanClient started successfully for folder: ${key}`)
+
+            // *** === WebSocket Server Activation === ***
+            const config = workspace.getConfiguration('lean4')
+            const wsEnabled = config.get<boolean>('server.websocket.enable', false)
+
+            if (wsEnabled) {
+                const wsHost = config.get<string>('server.websocket.host', '127.0.0.1')
+                const wsPort = config.get<number>('server.websocket.port', 8080)
+                logger.log(`[ClientProvider] WebSocket server enabled for ${key}. Attempting start on ${wsHost}:${wsPort}...`)
+                try {
+                    // Call the public method on the client instance
+                    await client.startWebSocketServer(wsHost, wsPort)
+                    logger.log(`[ClientProvider] WebSocket server started successfully for ${key}.`)
+                } catch (err: any) {
+                    logger.error(`[ClientProvider] Failed to start WebSocket server for ${key}: ${err.message || err}`)
+                    // Optionally show a less intrusive error message than the one in startWebSocketServer
+                    void window.showWarningMessage(`Lean WebSocket Proxy failed to start for ${folderUri.toString() || 'untitled'} (Port: ${wsPort}). See Output > Lean Client for details.`)
+                }
+            } else {
+                 logger.log(`[ClientProvider] WebSocket server is disabled for ${key}.`)
+            }
+        } catch (error) {
+             logger.error(`[ClientProvider] Error during client setup/start for ${key}: ${error}`)
+             // Ensure cleanup if start or subsequent setup fails
+             if (this.clients.has(key)) {
+                this.clients.delete(key);
+                client.dispose(); // This will also attempt to stop WS server if it partially started
+             }
+             if (this.activeClient === client) this.activeClient = undefined;
+             this.pending.delete(key); // Make sure pending is cleared on error
+             return [false, undefined]; // Indicate failure
+        }
 
         this.pending.delete(key)
         this.activeClient = client
@@ -315,5 +364,10 @@ export class LeanClientProvider implements Disposable {
         for (const s of this.subscriptions) {
             s.dispose()
         }
+        this.subscriptions = []
+        this.clients.clear()
+        this.pending.clear()
+        this.activeClient = undefined
+        logger.log('[ClientProvider] Disposed.')
     }
 }

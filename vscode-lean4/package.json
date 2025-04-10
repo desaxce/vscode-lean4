@@ -32,6 +32,23 @@
                     "default": true,
                     "markdownDescription": "Enable Lean input mode."
                 },
+                "lean4.server.websocket.enable": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable the experimental WebSocket server proxy for the Lean language server. Requires a VS Code reload or Lean server restart."
+                },
+                "lean4.server.websocket.host": {
+                    "type": "string",
+                    "default": "127.0.0.1",
+                    "scope": "window",
+                    "description": "Host address for the WebSocket server proxy (e.g., '127.0.0.1', '0.0.0.0'). Requires a VS Code reload or Lean server restart."
+                },
+                "lean4.server.websocket.port": {
+                    "type": "number",
+                    "default": 8080,
+                    "scope": "window",
+                    "description": "Port for the WebSocket server proxy. Requires a VS Code reload or Lean server restart."
+                },
                 "lean4.input.customTranslations": {
                     "type": "object",
                     "items": {

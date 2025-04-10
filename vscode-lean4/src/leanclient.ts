@@ -1,3 +1,11 @@
+import * as http from 'http' // Add Node's http module
+import express from 'express'
+import { WebSocketServer, WebSocket } from 'ws' // Explicitly import WebSocket type if needed
+import * as rpc from 'vscode-ws-jsonrpc'
+import * as jsonrpcserver from 'vscode-ws-jsonrpc/server'
+import { ChildProcess } from 'child_process'
+import { workspace, window as vsCodeWindow } from 'vscode' // Import workspace and window for settings/messages
+
 import {
     DiagnosticCollection,
     Disposable,
@@ -9,7 +17,6 @@ import {
     ProgressLocation,
     ProgressOptions,
     Range,
-    window,
     WorkspaceFolder,
 } from 'vscode'
 import {
@@ -71,116 +78,6 @@ const leanClientCapabilities: LeanClientCapabilties = {
     silentDiagnosticSupport: true,
 }
 
-import { ChildProcess } from 'child_process'
-import express from 'express'
-import * as rpc from 'vscode-ws-jsonrpc'
-import * as jsonrpcserver from 'vscode-ws-jsonrpc/server'
-import { WebSocketServer } from 'ws'
-
-const app = express()
-
-const PORT = 8080
-
-const initResponse = {
-    result: {
-        serverInfo: {
-            version: '0.2.0',
-            name: 'Lean 4 Server',
-        },
-        capabilities: {
-            workspaceSymbolProvider: true,
-            typeDefinitionProvider: true,
-            textDocumentSync: {
-                willSaveWaitUntil: false,
-                willSave: false,
-                save: {
-                    includeText: true,
-                },
-                openClose: true,
-                change: 2,
-            },
-            semanticTokensProvider: {
-                range: true,
-                legend: {
-                    tokenTypes: [
-                        'keyword',
-                        'variable',
-                        'property',
-                        'function',
-                        'namespace',
-                        'type',
-                        'class',
-                        'enum',
-                        'interface',
-                        'struct',
-                        'typeParameter',
-                        'parameter',
-                        'enumMember',
-                        'event',
-                        'method',
-                        'macro',
-                        'modifier',
-                        'comment',
-                        'string',
-                        'number',
-                        'regexp',
-                        'operator',
-                        'decorator',
-                        'leanSorryLike',
-                    ],
-                    tokenModifiers: [
-                        'declaration',
-                        'definition',
-                        'readonly',
-                        'static',
-                        'deprecated',
-                        'abstract',
-                        'async',
-                        'modification',
-                        'documentation',
-                        'defaultLibrary',
-                    ],
-                },
-                full: true,
-            },
-            renameProvider: { prepareProvider: true },
-            referencesProvider: true,
-            inlayHintProvider: { workDoneProgress: false, resolveProvider: false },
-            hoverProvider: true,
-            foldingRangeProvider: true,
-            documentSymbolProvider: true,
-            documentHighlightProvider: true,
-            definitionProvider: true,
-            declarationProvider: true,
-            completionProvider: { triggerCharacters: ['.'], resolveProvider: true },
-            codeActionProvider: {
-                workDoneProgress: false,
-                resolveProvider: true,
-                codeActionKinds: ['quickfix', 'refactor'],
-            },
-            callHierarchyProvider: true,
-        },
-    },
-    jsonrpc: '2.0',
-    id: 0,
-}
-
-const server = app.listen(PORT, () => console.log(`Listening on ${PORT}`))
-
-const wss = new WebSocketServer({ server })
-
-function startServerProcess(serverProcess: ChildProcess) {
-    serverProcess.on('error', error => console.error(`Launching Lean Server failed: ${error}`))
-
-    if (serverProcess.stderr !== null) {
-        serverProcess.stderr.on('data', data => {
-            console.error(`Lean Server: ${data}`)
-        })
-    }
-
-    return serverProcess
-}
-
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 export type ServerProgress = Map<ExtUri, LeanFileProgressProcessingInfo[]>
@@ -188,7 +85,7 @@ export type ServerProgress = Map<ExtUri, LeanFileProgressProcessingInfo[]>
 export class LeanClient implements Disposable {
     running: boolean
     private client: LanguageClient | undefined
-    private client_web: LanguageClient | undefined
+    // private client_web: LanguageClient | undefined
     private outputChannel: OutputChannel
     folderUri: ExtUri
     private subscriptions: Disposable[] = []
@@ -196,6 +93,9 @@ export class LeanClient implements Disposable {
     private showingRestartMessage: boolean = false
     private isRestarting: boolean = false
     private staleDepNotifier: Disposable | undefined
+
+    private httpServer: http.Server | undefined
+    private webSocketServer: WebSocketServer | undefined
 
     private openServerDocuments: Set<string> = new Set<string>()
 
@@ -240,6 +140,7 @@ export class LeanClient implements Disposable {
         this.outputChannel = outputChannel
         this.folderUri = folderUri
         this.subscriptions.push(new Disposable(() => this.staleDepNotifier?.dispose()))
+        this.subscriptions.push(new Disposable(() => this.stopWebSocketServer()))
     }
 
     dispose(): void {
@@ -329,7 +230,7 @@ export class LeanClient implements Disposable {
                 title: '[Server Startup] Starting Lean language client',
                 cancellable: false,
             }
-            await window.withProgress(
+            await vsCodeWindow.withProgress(
                 progressOptions,
                 async progress => await this.startClient(progress, defaultToolchain),
             )
@@ -383,11 +284,13 @@ export class LeanClient implements Disposable {
         const toolchainOverride: string | undefined =
             toolchainOverrideResult.kind === 'Override' ? toolchainOverrideResult.toolchain : undefined
 
+        this.stopWebSocketServer()
+
         this.client = await this.setupClient(toolchainOverride)
 
-        this.client_web = await this.setupClient(toolchainOverride)
+        // this.client_web = await this.setupClient(toolchainOverride)
 
-        await this.client_web.start()
+        // await this.client_web.start()
 
         let insideRestart = true
         try {
@@ -473,80 +376,79 @@ export class LeanClient implements Disposable {
             }
         })
 
-        const serverProcess = (this.client_web as any)._serverProcess
+        // const serverProcess = (this.client_web as any)._serverProcess
 
-        wss.addListener('connection', function (ws, req) {
-            console.log(`Socket opened`, serverProcess)
+        // wss.addListener('connection', function (ws, req) {
+        //     console.log(`Socket opened`, serverProcess)
 
-            const ps = startServerProcess(serverProcess)
+        //     const ps = startServerProcess(serverProcess)
 
-            const socket: rpc.IWebSocket = {
-                onMessage: cb => {
-                    ws.on('message', cb)
-                },
-                onError: cb => {
-                    ws.on('error', cb)
-                },
-                onClose: cb => {
-                    ws.on('close', cb)
-                },
-                send: data => {
-                    ws.send(data)
-                },
-                dispose: function (): void {
-                    throw new Error('Function not implemented.')
-                },
-            }
+        //     const socket: rpc.IWebSocket = {
+        //         onMessage: cb => {
+        //             ws.on('message', cb)
+        //         },
+        //         onError: cb => {
+        //             ws.on('error', cb)
+        //         },
+        //         onClose: cb => {
+        //             ws.on('close', cb)
+        //         },
+        //         send: data => {
+        //             ws.send(data)
+        //         },
+        //         dispose: function (): void {
+        //             throw new Error('Function not implemented.')
+        //         },
+        //     }
 
-            const reader = new rpc.WebSocketMessageReader(socket)
-            const writer = new rpc.WebSocketMessageWriter(socket)
+        //     const reader = new rpc.WebSocketMessageReader(socket)
+        //     const writer = new rpc.WebSocketMessageWriter(socket)
 
-            const socketConnection = jsonrpcserver.createConnection(reader, writer, () => ws.close())
-            const serverConnection = jsonrpcserver.createProcessStreamConnection(ps)
+        //     const socketConnection = jsonrpcserver.createConnection(reader, writer, () => ws.close())
+        //     const serverConnection = jsonrpcserver.createProcessStreamConnection(ps)
 
-            if (serverConnection) {
-                socketConnection.reader.listen(message => {
-                    console.debug('Received message:', message)
+        //     if (serverConnection) {
+        //         socketConnection.reader.listen(message => {
+        //             console.debug('Received message:', message)
 
-                    if ((message as any).method === 'initialize') {
-                        socketConnection.writer.write(initResponse)
-                    } else if ((message as any).method === "shutdown") {
-                        const response = { jsonrpc: "2.0", id: (message as any).id, result: null };
-                        socketConnection.writer.write(response);
-                    } else if ((message as any).method === "exit") {
+        //             if ((message as any).method === 'initialize') {
+        //                 socketConnection.writer.write(initResponse)
+        //             } else if ((message as any).method === 'shutdown') {
+        //                 const response = { jsonrpc: '2.0', id: (message as any).id, result: null }
+        //                 socketConnection.writer.write(response)
+        //             } else if ((message as any).method === 'exit') {
+        //             } else {
+        //                 serverConnection.writer.write(message)
+        //             }
+        //         })
 
-                    } else {
-                        serverConnection.writer.write(message)
-                    }
-                })
+        //         socketConnection.forward(serverConnection, message => message)
+        //         serverConnection.forward(socketConnection, message => message)
+        //     }
 
-                socketConnection.forward(serverConnection, message => message)
-                serverConnection.forward(socketConnection, message => message)
-            }
+        //     if (ps.stderr) {
+        //         ps.stderr.on('data', data => {
+        //             let msg = {
+        //                 jsonrpc: '2.0',
+        //                 id: '1',
+        //                 error: {
+        //                     message: data.toString(),
+        //                     code: '-1',
+        //                 },
+        //             }
+        //             ws.send(JSON.stringify(msg))
+        //         })
+        //     }
 
-            if (ps.stderr) {
-                ps.stderr.on('data', data => {
-                    let msg = {
-                        jsonrpc: '2.0',
-                        id: '1',
-                        error: {
-                            message: data.toString(),
-                            code: '-1',
-                        },
-                    }
-                    ws.send(JSON.stringify(msg))
-                })
-            }
+        //     ws.on('error', error => {
+        //         console.error(`WebSocket error: ${error.message}`)
+        //     })
 
-            ws.on('error', error => {
-                console.error(`WebSocket error: ${error.message}`)
-            })
-
-            ws.on('close', () => {
-                console.log(`[${new Date()}] Socket closed`)
-            })
-            console.log('server connection success')
-        })
+        //     ws.on('close', () => {
+        //         console.log(`[${new Date()}] Socket closed`)
+        //     })
+        //     console.log('server connection success')
+        // })
 
         this.restartedEmitter.fire(undefined)
         insideRestart = false
@@ -642,6 +544,8 @@ export class LeanClient implements Disposable {
     }
 
     async stop(): Promise<void> {
+        this.stopWebSocketServer()
+
         if (this.client && this.running) {
             this.noPrompt = true
             try {
@@ -900,5 +804,251 @@ export class LeanClient implements Disposable {
 
         patchConverters(client.protocol2CodeConverter, client.code2ProtocolConverter)
         return client
+    }
+
+    async startWebSocketServer(host: string, port: number): Promise<void> {
+        if (this.httpServer || this.webSocketServer) {
+            // logger.warn('[LeanClient] WebSocket server already running or starting.')
+            return
+        }
+
+        // Ensure the main client and its process are available
+        const serverProcess = (this.client as any)?._serverProcess as ChildProcess | undefined
+        if (!this.client || !this.running || !serverProcess) {
+            logger.error('[LeanClient] Cannot start WebSocket server: Language client is not running or process is unavailable.')
+            throw new Error('Language client not ready for WebSocket proxy.')
+        }
+
+        logger.log(`[LeanClient] Attempting to start WebSocket server on ${host}:${port}`)
+
+        const app = express()
+        // You might want to add basic middleware like CORS if needed
+        // app.use(cors()); // Example: import cors from 'cors';
+
+        // Define the static init response (consider making this dynamic based on actual client capabilities if needed)
+        const initResponse = { /* ... (copy your initResponse object here) ... */
+            result: {
+                serverInfo: { version: '0.2.0', name: 'Lean 4 Server (WebSocket Proxy)' }, // Adjust name
+                capabilities: { /* ... copy capabilities ... */ }
+            }, jsonrpc: '2.0', id: 0, // ID might need dynamic handling if client sends initialize with specific ID
+        };
+
+        // Helper to log Lean server process stderr/stdout if needed within the proxy context
+        function setupProcessLogging(ps: ChildProcess) {
+            ps.on('error', error => logger.error(`[WS Proxy] Lean Server process error: ${error}`))
+            if (ps.stderr) {
+                ps.stderr.on('data', data => logger.error(`[WS Proxy] Lean Server stderr: ${data}`))
+            }
+            // Optionally log stdout too
+            // if (ps.stdout) {
+            //     ps.stdout.on('data', data => logger.log(`[WS Proxy] Lean Server stdout: ${data}`));
+            // }
+            return ps;
+        }
+
+        try {
+            await new Promise<void>((resolve, reject) => {
+                this.httpServer = app.listen(port, host, () => {
+                    logger.log(`[LeanClient] HTTP server listening on ${host}:${port} for WebSocket connections.`)
+                    this.webSocketServer = new WebSocketServer({ server: this.httpServer })
+
+                    this.webSocketServer.on('error', (error) => {
+                        logger.error(`[LeanClient] WebSocket Server error: ${error}`)
+                        this.stopWebSocketServer() // Stop on error
+                        reject(error); // Reject the promise if WSS fails immediately
+                    });
+
+                    this.webSocketServer.addListener('connection', (ws: WebSocket, req) => {
+                        const clientAddr = req.socket.remoteAddress || 'unknown';
+                        logger.log(`[WS Proxy] Client connected from ${clientAddr}`);
+
+                        // Important: We use the *single* running serverProcess from the LeanClient instance.
+                        // Do *not* try to start a new process per connection.
+                        // We just need to ensure the existing process's streams are piped correctly.
+                        const ps = setupProcessLogging(serverProcess); // Add logging listeners
+
+                        const socket: rpc.IWebSocket = {
+                            send: content => ws.send(content, error => {
+                                if (error) logger.error(`[WS Proxy] Error sending to client ${clientAddr}: ${error}`);
+                            }),
+                            onMessage: cb => ws.on('message', (data) => {
+                                // logger.debug(`[WS Proxy] C->S: ${data}`); // Log message content if needed
+                                cb(data)
+                            }),
+                            onError: cb => ws.on('error', error => {
+                                logger.error(`[WS Proxy] Client socket error (${clientAddr}): ${error.message}`);
+                                cb(error)
+                            }),
+                            onClose: cb => ws.on('close', (code, reason) => {
+                                logger.log(`[WS Proxy] Client disconnected ${clientAddr}: code ${code}, reason ${reason?.toString()}`);
+                                cb(code, reason?.toString())
+                            }),
+                            dispose: () => ws.close() // Simple dispose implementation
+                        };
+
+                        const reader = new rpc.WebSocketMessageReader(socket);
+                        const writer = new rpc.WebSocketMessageWriter(socket);
+
+                        // Connection between the WebSocket client and this proxy
+                        const socketConnection = jsonrpcserver.createConnection(reader, writer, () => socket.dispose());
+
+                        // Connection between this proxy and the actual Lean server process
+                        const serverConnection = jsonrpcserver.createProcessStreamConnection(ps);
+
+                        // Forward messages, handling 'initialize', 'shutdown', 'exit' specially
+                        // Using forward can be simpler but gives less control for specific messages.
+                        // Let's intercept manually for initialize/shutdown/exit.
+
+                        // let clientInitialized = false; // Track client state
+
+                        // socketConnection.reader.listen(message => {
+                        //    // logger.debug(`[WS Proxy] Received from client ${clientAddr}:`, JSON.stringify(message));
+                        //     if (rpc.isRequestMessage(message)) {
+                        //         if ((message as any).method === 'initialize') {
+                        //             clientInitialized = true;
+                        //             // Respond with pre-defined capabilities. Adjust ID if needed.
+                        //             const response = { ...initResponse, id: message.id };
+                        //             logger.log(`[WS Proxy] Responding to 'initialize' from ${clientAddr}`);
+                        //             socketConnection.writer.write(response);
+                        //         } else if ((message as any).method === 'shutdown') {
+                        //             // Client is shutting down connection to proxy
+                        //             logger.log(`[WS Proxy] Received 'shutdown' from ${clientAddr}`);
+                        //             // We should NOT shut down the actual Lean server here,
+                        //             // just acknowledge the shutdown to the client.
+                        //             clientInitialized = false; // Reset flag
+                        //             const response = { jsonrpc: "2.0", id: (message as any).id, result: null };
+                        //             socketConnection.writer.write(response);
+                        //         } else {
+                        //             // Forward other requests to the Lean server
+                        //             if (clientInitialized) {
+                        //                 // logger.debug(`[WS Proxy] Forwarding request to Lean Server: ${message.method}`);
+                        //                 serverConnection.writer.write(message);
+                        //             } else {
+                        //                  logger.warn(`[WS Proxy] Received request "${message.method}" before 'initialize' from ${clientAddr}. Ignoring.`);
+                        //                  // Optionally send an error response
+                        //                  const response = { jsonrpc: "2.0", id: message.id, error: { code: -32002, message: "Server not initialized" } };
+                        //                  socketConnection.writer.write(response);
+                        //             }
+                        //         }
+                        //     } else if (rpc.isNotificationMessage(message)) {
+                        //         if (message.method === 'exit') {
+                        //             // Client is signaling exit after shutdown.
+                        //             logger.log(`[WS Proxy] Received 'exit' from ${clientAddr}. Closing WS connection.`);
+                        //             // We do NOT exit the actual Lean server process.
+                        //             // Just close this specific WebSocket connection.
+                        //             socketConnection.dispose(); // This should trigger ws.close() via the dispose callback
+                        //         } else if (message.method.startsWith('$/')) {
+                        //             // Ignore LSP protocol notifications from client to server
+                        //             // logger.debug(`[WS Proxy] Ignoring client notification: ${message.method}`);
+                        //         }
+                        //         else {
+                        //             // Forward other notifications (like didOpen, didChange) to the Lean server
+                        //              if (clientInitialized) {
+                        //                 // logger.debug(`[WS Proxy] Forwarding notification to Lean Server: ${message.method}`);
+                        //                 serverConnection.writer.write(message);
+                        //             } else {
+                        //                  logger.warn(`[WS Proxy] Received notification "${message.method}" before 'initialize' from ${clientAddr}. Ignoring.`);
+                        //             }
+                        //         }
+                        //     } else if (rpc.isResponseMessage(message)) {
+                        //         // Responses should not come from the client in this direction
+                        //         logger.warn(`[WS Proxy] Received unexpected response message from client ${clientAddr}:`, JSON.stringify(message));
+                        //     } else {
+                        //         logger.warn(`[WS Proxy] Received unknown message type from client ${clientAddr}:`, JSON.stringify(message));
+                        //     }
+                        // });
+
+                        // // Forward messages from the Lean server process back to the WebSocket client
+                        // serverConnection.reader.listen(message => {
+                        //    // logger.debug(`[WS Proxy] Received from Lean Server:`, JSON.stringify(message));
+                        //     // logger.debug(`[WS Proxy] Forwarding to client ${clientAddr}: ${JSON.stringify(message).substring(0,100)}...`);
+                        //     socketConnection.writer.write(message);
+                        // });
+
+                        // // Handle disposal/closure of connections
+                        // socketConnection.onClose(() => {
+                        //     logger.log(`[WS Proxy] socketConnection closed for ${clientAddr}. Disposing server connection pipe.`);
+                        //     serverConnection.dispose(); // Stop listening/writing to the process for this client
+                        // });
+                        // socketConnection.onError(e => {
+                        //      logger.error(`[WS Proxy] socketConnection error for ${clientAddr}: ${e}`);
+                        //      serverConnection.dispose();
+                        // })
+                        // serverConnection.onClose(() => {
+                        //      logger.log(`[WS Proxy] serverConnection pipe closed for ${clientAddr}. Disposing socket connection.`);
+                        //      socketConnection.dispose(); // Ensure socket connection is also closed if process pipe breaks
+                        // });
+                        //  serverConnection.onError(e => {
+                        //      logger.error(`[WS Proxy] serverConnection pipe error for ${clientAddr}: ${e}`);
+                        //      socketConnection.dispose();
+                        // })
+
+                        if (serverConnection) {
+                            socketConnection.reader.listen(message => {
+                                console.debug('Received message:', message)
+            
+                                if ((message as any).method === 'initialize') {
+                                    void socketConnection.writer.write(initResponse)
+                                } else if ((message as any).method === 'shutdown') {
+                                    const response = { jsonrpc: '2.0', id: (message as any).id, result: null };
+                                    void socketConnection.writer.write(response);
+                                } else if ((message as any).method === 'exit') {
+            
+                                } else {
+                                    void serverConnection.writer.write(message)
+                                }
+                            })
+            
+                            socketConnection.forward(serverConnection, message => message)
+                            serverConnection.forward(socketConnection, message => message)
+                        }
+                        logger.log(`[WS Proxy] Connection established successfully for ${clientAddr}.`);
+
+                    });
+
+                    resolve(); // HTTP server is listening, WSS is set up
+                }).on('error', (err: NodeJS.ErrnoException) => {
+                    logger.error(`[LeanClient] HTTP server failed to listen on ${host}:${port}: ${err.message}`)
+                    this.httpServer = undefined; // Clear server ref on error
+                    if (err.code === 'EADDRINUSE') {
+                        void vsCodeWindow.showErrorMessage(`Lean WebSocket Proxy: Port ${port} is already in use.`);
+                        reject(new Error(`Port ${port} already in use.`));
+                    } else {
+                        void vsCodeWindow.showErrorMessage(`Lean WebSocket Proxy: Could not start on ${host}:${port}. See Output > Lean Client.`);
+                        reject(err);
+                    }
+                });
+            });
+        } catch (error) {
+            logger.error(`[LeanClient] Failed to start WebSocket server: ${error}`)
+            this.stopWebSocketServer(); // Ensure cleanup on error
+            throw error; // Re-throw the error to be caught by the provider
+        }
+    }
+
+    private stopWebSocketServer(): void {
+        if (this.webSocketServer) {
+            logger.log('[LeanClient] Closing WebSocket server...')
+            this.webSocketServer.close(err => {
+                if (err) {
+                    logger.error(`[LeanClient] Error closing WebSocket server: ${err}`)
+                } else {
+                    logger.log('[LeanClient] WebSocket server closed.')
+                }
+            })
+            this.webSocketServer = undefined
+        }
+
+        if (this.httpServer) {
+            logger.log('[LeanClient] Closing HTTP server...')
+            this.httpServer.close(err => {
+                if (err) {
+                    logger.error(`[LeanClient] Error closing HTTP server: ${err}`)
+                } else {
+                    logger.log('[LeanClient] HTTP server closed.')
+                }
+            })
+            this.httpServer = undefined
+        }
     }
 }
