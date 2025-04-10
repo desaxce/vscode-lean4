@@ -826,12 +826,89 @@ export class LeanClient implements Disposable {
         // app.use(cors()); // Example: import cors from 'cors';
 
         // Define the static init response (consider making this dynamic based on actual client capabilities if needed)
-        const initResponse = { /* ... (copy your initResponse object here) ... */
+        const initResponse = {
             result: {
-                serverInfo: { version: '0.2.0', name: 'Lean 4 Server (WebSocket Proxy)' }, // Adjust name
-                capabilities: { /* ... copy capabilities ... */ }
-            }, jsonrpc: '2.0', id: 0, // ID might need dynamic handling if client sends initialize with specific ID
-        };
+                serverInfo: {
+                    version: '0.2.0',
+                    name: 'Lean 4 Server (WebSocket Proxy)',
+                },
+                capabilities: {
+                    workspaceSymbolProvider: true,
+                    typeDefinitionProvider: true,
+                    textDocumentSync: {
+                        willSaveWaitUntil: false,
+                        willSave: false,
+                        save: {
+                            includeText: true,
+                        },
+                        openClose: true,
+                        change: 2,
+                    },
+                    semanticTokensProvider: {
+                        range: true,
+                        legend: {
+                            tokenTypes: [
+                                'keyword',
+                                'variable',
+                                'property',
+                                'function',
+                                'namespace',
+                                'type',
+                                'class',
+                                'enum',
+                                'interface',
+                                'struct',
+                                'typeParameter',
+                                'parameter',
+                                'enumMember',
+                                'event',
+                                'method',
+                                'macro',
+                                'modifier',
+                                'comment',
+                                'string',
+                                'number',
+                                'regexp',
+                                'operator',
+                                'decorator',
+                                'leanSorryLike',
+                            ],
+                            tokenModifiers: [
+                                'declaration',
+                                'definition',
+                                'readonly',
+                                'static',
+                                'deprecated',
+                                'abstract',
+                                'async',
+                                'modification',
+                                'documentation',
+                                'defaultLibrary',
+                            ],
+                        },
+                        full: true,
+                    },
+                    renameProvider: { prepareProvider: true },
+                    referencesProvider: true,
+                    inlayHintProvider: { workDoneProgress: false, resolveProvider: false },
+                    hoverProvider: true,
+                    foldingRangeProvider: true,
+                    documentSymbolProvider: true,
+                    documentHighlightProvider: true,
+                    definitionProvider: true,
+                    declarationProvider: true,
+                    completionProvider: { triggerCharacters: ['.'], resolveProvider: true },
+                    codeActionProvider: {
+                        workDoneProgress: false,
+                        resolveProvider: true,
+                        codeActionKinds: ['quickfix', 'refactor'],
+                    },
+                    callHierarchyProvider: true,
+                },
+            },
+            jsonrpc: '2.0',
+            id: 0,
+        }
 
         // Helper to log Lean server process stderr/stdout if needed within the proxy context
         function setupProcessLogging(ps: ChildProcess) {
